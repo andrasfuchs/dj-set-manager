@@ -1,0 +1,4 @@
+# Use CPython 3.11 for Essentia support.
+mutagen
+numpy
+essentia; python_version < "3.12"
