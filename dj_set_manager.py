@@ -1,4 +1,7 @@
-# Run this script in WSL with the following command in the PowerShell Terminal: wsl python3 /mnt/r/Media/Music/GroovyTunes/Scripts/dj_set_manager.py
+# Run this script in WSL with the following command in the PowerShell Terminal:
+# wsl env TF_CPP_MIN_LOG_LEVEL=2 python3 /mnt/r/Media/Music/GroovyTunes/Scripts/dj_set_manager.py
+# TF_CPP_MIN_LOG_LEVEL=2 suppresses TensorFlow C++ verbose output.
+# WSL is required due to a compatibility issue with Essentia's TensorFlow backend on Windows.
 
 import os
 import json

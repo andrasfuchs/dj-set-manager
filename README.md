@@ -6,8 +6,11 @@ A Python tool that automates the curation of DJ sets from a large music library.
 
 ## Table of Contents
 
+- [Background & Motivation](#background--motivation)
+- [Full DJ Workflow](#full-dj-workflow)
 - [Features](#features)
 - [How It Works](#how-it-works)
+- [Why These Tools?](#why-these-tools)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
   - [Windows](#windows)
@@ -17,7 +20,91 @@ A Python tool that automates the curation of DJ sets from a large music library.
   - [Windows](#running-on-windows)
   - [WSL](#running-in-wsl)
 - [Pipeline Phases](#pipeline-phases)
+- [Exporting to USB for Pioneer CDJs](#exporting-to-usb-for-pioneer-cdjs)
+- [Known Limitations](#known-limitations)
 - [Data Files](#data-files)
+
+---
+
+## Background & Motivation
+
+This project was born from the challenge of curating a DJ set from a library of tens of thousands of tracks. The goal was to select roughly 500 tracks that are strong candidates for a live set on **Pioneer CDJ-2000NXS2** players, based on a handful of manually chosen favourites.
+
+Off-the-shelf tools each solve part of the problem but none covers it end-to-end:
+
+- **Mood Detector** quickly assigns mood, energy, BPM, and key to every file in a large library — but its genre classification is rule-based and not nuanced enough for electronic music sub-genres.
+- **Mixed In Key (MIK)** provides industry-standard harmonic key detection (Camelot Wheel) and automatic hot-cue generation — but it struggles with batches larger than ~200 files, its ID3 comment-tag writer is buggy in version 11.1, and it has no concept of percentage-based genre certainty.
+- **Essentia's *discogs-effnet* model** was trained on over two million Discogs tracks and outputs probability scores for 400 sub-genres (including granular electronic styles like Detroit Techno, Minimal Techno, and Acid). It runs entirely locally with no rate limits.
+- **AlphaTheta Rekordbox 7 (free / Export Mode)** is the only tool needed to write the Pioneer CDJ proprietary database onto a USB drive. The paid tiers add nothing required for this workflow.
+
+`dj-set-manager` acts as the glue layer that orchestrates all of these tools in the correct order.
+
+---
+
+## Full DJ Workflow
+
+The script sits in the middle of a broader preparation pipeline. Here is the complete end-to-end workflow from raw library to CDJ-ready USB stick:
+
+```
+[23 000+ track library]
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 1 — Mood Detector                                     │
+│  Analyses every file (BPM, energy, mood, key).              │
+│  Outputs: music_library_cache.json                          │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 2 — dj-set-manager Phase 1 (run in WSL)               │
+│  Runs each MP3 through Essentia's discogs-effnet model to   │
+│  extract percentage-based electronic sub-genre scores.      │
+│  Outputs: genre_refinement_results.json                     │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 3 — dj-set-manager Phase 2 (run in WSL)               │
+│  Filters by BPM, energy, genre profile and copies           │
+│  ~500 matching tracks to the destination folder.            │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 4 — Mixed In Key 11 (Windows, batches ≤ 200 tracks)   │
+│  Provides accurate Camelot keys, energy ratings, and        │
+│  generates structural hot-cue points.                       │
+│  Export: select all tracks → Export to CSV                  │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 5 — dj-set-manager Phase 3 & 4 (run in WSL)           │
+│  Phase 3: writes Essentia genres, Mood Detector energy,     │
+│           and MIK key/BPM into ID3 tags via mutagen.        │
+│  Phase 4: reads MIK sidecar files and syncs TKEY tags;      │
+│           exports cue-point JSON.                           │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 6 — Rekordbox 7 (free / Export Mode, Windows)         │
+│  Import the destination folder. Rekordbox reads the         │
+│  ID3 tags written in Phase 3 automatically.                 │
+│  Use the XML bridge to import MIK cue points:               │
+│    File → Export collection in XML format →                 │
+│    open in MIK → Export Cue Points →                        │
+│    refresh XML tree in Rekordbox → re-import tracks.        │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 7 — USB Export (Rekordbox → FAT32 USB drive)          │
+│  Sync the final playlist to a FAT32-formatted USB.          │
+│  Plug into Pioneer CDJ-2000NXS2 — done.                     │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -47,6 +134,28 @@ The pipeline is split into five phases that are run interactively one after anot
 
 ---
 
+## Why These Tools?
+
+### Essentia + discogs-effnet for genre detection
+
+Essentia (maintained by the Music Technology Group, latest release May 2026) is the best fully local, free option for percentage-based multi-label genre classification. The *discogs-effnet-bs64* embedding model combined with the *genre_discogs400* classifier was trained on over two million Discogs tracks covering 400 sub-genres. It is especially strong on electronic music because Discogs is heavily used by electronic music collectors and labels.
+
+Unlike rule-based tools, the model outputs a probability score (0–1) for every sub-genre simultaneously. A single track might score 0.80 Techno, 0.25 Detroit Techno, and 0.22 Minimal Techno — exactly the kind of nuanced, overlapping classification needed for advanced set curation. This script keeps only the `Electronic---*` labels above 20 % confidence and stores them as a percentage list in the ID3 `TCON` tag (e.g. `Techno (80%), Detroit Techno (25%), Minimal Techno (22%)`).
+
+### Mood Detector for energy and BPM pre-filtering
+
+[Mood Detector](https://github.com/andrasfuchs/mood-detector) analyses the full library cheaply (~2 seconds per track) and provides energy levels and BPM. Its energy estimates are more accurate than Mixed In Key's 1–10 scale for the purpose of filtering a large collection because they are expressed as continuous floats (0.0–1.0) derived directly from audio features rather than rounded to integer steps.
+
+### Mixed In Key for harmonic key and cue points
+
+Mixed In Key is the industry standard for Camelot-Wheel harmonic key detection. Its key accuracy is significantly higher than librosa-based methods (used by Mood Detector) because it performs deeper structural harmonic analysis. It also auto-generates hot-cue points at musical transitions (drops, breakdowns, intros). Because MIK's ID3 comment-tag writer is buggy in version 11.1, this script reads the key and BPM values from MIK's sidecar files and applies them to the ID3 tags itself via `mutagen`.
+
+### Rekordbox free / Export Mode
+
+The free tier of AlphaTheta Rekordbox 7 fully supports Export Mode, which is the only feature needed to write the Pioneer CDJ proprietary database to a USB drive. The paid tiers (Performance and Creative plans) add DJ software controller features that are irrelevant when playing from CDJs.
+
+---
+
 ## Prerequisites
 
 | Requirement | Version | Notes |
@@ -54,7 +163,9 @@ The pipeline is split into five phases that are run interactively one after anot
 | Python | **3.11** | Essentia wheels are only published for CPython 3.11 |
 | pip | latest | Bundled with Python |
 | [Mood Detector](https://github.com/andrasfuchs/mood-detector) | any | Provides `music_library_cache.json` used in Phase 2 |
-| Mixed In Key *(optional)* | any | Only needed for Phase 4 cue-point sidecar sync |
+| [Mixed In Key](https://mixedinkey.com/) *(optional)* | **11** | Phase 4 key sync; export your library as CSV or use sidecar files |
+| [Rekordbox](https://rekordbox.com/) *(optional)* | **7.2+** | Free Export Mode is sufficient; used after Phase 4 to build the CDJ USB |
+| WSL 2 + Ubuntu | any | Recommended runtime; Essentia TensorFlow support is more stable on Linux |
 
 > **Why Python 3.11?**  
 > The `essentia` package distributes pre-compiled TensorFlow wheels only for CPython ≤ 3.11. The `requirements.txt` file enforces this with a `python_version < "3.12"` marker.
@@ -199,18 +310,23 @@ python dj_set_manager.py
 
 ### Running in WSL
 
-From a **PowerShell** terminal you can launch the script directly in WSL with a single command:
+> **WSL is the recommended runtime.** Essentia's TensorFlow backend has a compatibility issue on Windows that prevents it from running correctly outside WSL.
+
+From a **PowerShell** terminal, launch the script directly in WSL with this exact command:
 
 ```powershell
-wsl python3 /mnt/c/Work/dj-set-manager/dj_set_manager.py
+wsl env TF_CPP_MIN_LOG_LEVEL=2 python3 /mnt/r/Media/Music/GroovyTunes/Scripts/dj_set_manager.py
 ```
 
-Or open the WSL shell first and run it from there:
+> `TF_CPP_MIN_LOG_LEVEL=2` suppresses TensorFlow's verbose C++ info and warning messages so that only the script's own output is visible in the terminal.
+
+Adjust the path after `python3` to match wherever you have stored `dj_set_manager.py`. If you cloned the repository to `C:\Work\dj-set-manager`, the equivalent path inside WSL is `/mnt/c/Work/dj-set-manager/dj_set_manager.py`.
+
+Alternatively, open a WSL shell first and run it from there:
 
 ```bash
-cd /mnt/c/Work/dj-set-manager
-source env/bin/activate
-python dj_set_manager.py
+source /mnt/c/Work/dj-set-manager/env/bin/activate
+TF_CPP_MIN_LOG_LEVEL=2 python3 /mnt/c/Work/dj-set-manager/dj_set_manager.py
 ```
 
 When the script starts, it will ask you interactively which phases to run:
@@ -259,6 +375,67 @@ Press **Enter** (or type `Y`) to run a phase, or type `N` to skip it.
 ### Phase 5 — Rekordbox Import *(manual)*
 
 After Phase 4 completes, import the contents of `destination_folder` into Rekordbox (or another DJ application) and build your set.
+
+---
+
+## Exporting to USB for Pioneer CDJs
+
+After Phase 4 is complete, the destination folder contains fully tagged MP3s ready to import into Rekordbox.
+
+### 1 — Import into Rekordbox
+
+1. Open Rekordbox 7 (free tier).
+2. Drag the destination folder into the **Collection** panel. Rekordbox will read the `TCON`, `TBPM`, and `TKEY` ID3 tags written by Phase 3 automatically.
+3. Analyse the tracks in Rekordbox to build beatgrids (`Track` → `Analyze Tracks`).
+
+### 2 — Bridge MIK cue points via XML
+
+Because hot-cue points cannot be stored in ID3 tags, an XML bridge is needed:
+
+1. In Rekordbox: **File → Export collection in XML format**. In Preferences, set *Export BeatGrid Information* to `BPM Change Points`.
+2. Open Mixed In Key 11, navigate to **Personalise → Export Cue Points**, and point it at the XML file you just exported.
+3. Back in Rekordbox, open the XML tree in the browser, right-click the updated tracks, and choose **Import to Collection** to fuse the cue points.
+
+### 3 — Format the USB drive (FAT32)
+
+Pioneer CDJ-2000NXS2 players require **FAT32** — they do **not** support exFAT. Windows 11 artificially limits FAT32 formatting to 32 GB in the GUI. Use one of these methods for a 256 GB+ drive:
+
+**Option A — PowerShell (no extra software needed)**
+
+```powershell
+# Run PowerShell as Administrator
+# Replace 'X' with your USB drive letter and adjust the label
+format X: /FS:FAT32 /Q /V:DJUSB
+```
+
+**Option B — Rufus (free GUI tool, recommended)**
+
+1. Download [Rufus](https://rufus.ie/) — a single portable `.exe`, no installation required.
+2. Select your USB drive, set *Boot selection* to `Non bootable`, and choose `FAT32` as the file system.
+3. Click **Start**.
+
+> The only practical disadvantage of FAT32 is a **4 GB per-file size limit**. This is irrelevant for individual MP3 tracks.
+
+### 4 — Sync to USB via Rekordbox Export Mode
+
+1. In Rekordbox, switch to **Export** mode (top-left mode selector).
+2. Connect the FAT32 USB drive.
+3. Drag your final playlist from the Collection onto the USB device in the left panel.
+4. Rekordbox writes the Pioneer proprietary database (`PIONEER/` folder) to the USB.
+5. Safely eject and plug into your CDJ-2000NXS2 — waveforms, cue points, and key/BPM data will load instantly.
+
+---
+
+## Known Limitations
+
+| Limitation | Details |
+|------------|---------|
+| **Python 3.11 only** | Essentia TensorFlow wheels are not published for Python 3.12+. Use the `env/` virtual environment created with Python 3.11. |
+| **Mixed In Key comment tag bug** | MIK 11.1's built-in ID3 comment writer is buggy. This script intentionally reads MIK data from sidecar files and writes tags itself via `mutagen` as a workaround. |
+| **MIK batch size** | Mixed In Key may freeze or crash if fed more than ~200 files at once. Process your selected tracks in batches before running Phase 4. |
+| **Electronic genres only** | Phase 1 discards any classification label that does not begin with `Electronic---`. Tracks from other genres will have an empty genre list after Phase 1. |
+| **Cue points require the XML bridge** | ID3 tags cannot carry hot-cue data. Hot cues generated by MIK must be transferred to Rekordbox manually via the XML export/import bridge described above. |
+| **FAT32 4 GB file limit** | The CDJ USB must be FAT32. Individual MP3 files are never near 4 GB, but WAV/AIFF files from very long mixes could exceed this limit. |
 
 ---
 
